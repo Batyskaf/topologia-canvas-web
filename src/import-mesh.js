@@ -66,7 +66,7 @@ function build(input,levels,params,options={}){
   progress('Naprawa przecięć na kopii…');const fixed=repairIntersections(prepared,input.denseInput?(params.maxSurfaceError-input.denseInput.errorBound)*input.denseInput.originalExtent/(2*prepared.transform.scale):params.maxSurfaceError,diagnostic,progress);prepared=fixed.mesh;geometryRepair=fixed.repair;
  }
  const dense=input.denseInput;let effectiveParams=params;if(dense){const remaining=params.maxSurfaceError-dense.errorBound;if(!(remaining>0))throw Error('Przygotowanie gęstego wejścia wykorzystało całą tolerancję. Zwiększ tolerancję lub użyj lżejszego modelu.');effectiveParams={...params,maxSurfaceError:remaining*dense.originalExtent/(2*prepared.transform.scale)};}
- progress('Redukcja z ochroną cech i kontrolą kolizji…');const sim=new T.Simulation(prepared,levels,effectiveParams);if(dense){sim.denseInput=dense;sim.requestedMaxSurfaceError=params.maxSurfaceError;}
+ progress('Redukcja, porządkowanie quadów i kontrola kolizji…');const sim=new T.Simulation(prepared,levels,effectiveParams);if(dense){sim.denseInput=dense;sim.requestedMaxSurfaceError=params.maxSurfaceError;}
  if(geometryRepair){sim.inputOriginal=original;sim.importRepair=geometryRepair;progress('Sprawdzanie wyniku względem oryginalnego pliku…');const fit=sim.compareOriginal({vertices:sim.vertices,faces:sim.faces},1);if(Math.max(fit.sourceToResult.max,fit.resultToSource.max)>2*(dense?(params.maxSurfaceError-dense.errorBound)*dense.originalExtent/(2*original.transform.scale):params.maxSurfaceError))throw Error('Wynik przekracza tolerancję względem oryginału sprzed naprawy. Zwiększ procent pozostawionych poligonów.');sim.originalFit=fit;}
  return {sim,repair,geometryRepair,diagnostic};
 }
