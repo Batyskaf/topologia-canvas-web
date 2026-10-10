@@ -147,5 +147,26 @@ function coarsen(mesh,source,surface,sourceIds,tolerance=.04){
  const report=A.inspect(mesh);if(mesh.faces.some(f=>T.quality(mesh.vertices,f)<qualityFloor-1e-8)||!report.valid||report.chi!==topo.chi||report.components!==topo.components){Object.assign(mesh,original);sourceIds.length=oldIds.length;oldIds.forEach((id,i)=>sourceIds[i]=id);return {collapsedQuads:0,before:original.faces.length,after:original.faces.length,rejected:true,reason:report.errors.join(' ')||'Scalenie pogorszyłoby jakość quadów.'};}
  return {collapsedQuads:original.faces.length-mesh.faces.length,before:original.faces.length,after:mesh.faces.length,mergedPatches:patches.length,mergedFans:fans};
 }
-const api={convert,regularize,coarsen};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TopologiaQuads=api;
+// Exchange a shared edge during growth, including gently curved patches.
+// Face count and face IDs stay stable so diffusion and nucleus fields survive.
+function evolve(mesh,surface,active,charts,cursor=0,tolerance=.04){
+ const A=typeof module!=='undefined'&&module.exports?require('./audit.js'):root.TopologiaAudit,{normal,dot,mean}=T.math,topo=T.topology(mesh),edges=[...topo.edges.values()].filter(e=>e.faces.length===2),v=mesh.vertices;
+ for(let index=0;index<Math.min(48,edges.length);index++){
+  const e=edges[(cursor+index)%edges.length],[a,b]=e.faces;if(!active[a]||!active[b])continue;
+  const fa=mesh.faces[a],fb=mesh.faces[b],n=normal(v,fa);if(dot(n,normal(v,fb))<.866)continue;
+  const border=[];for(const f of [fa,fb])for(let k=0;k<4;k++)if(key(f[k],f[(k+1)%4])!==key(e.a,e.b))border.push([f[k],f[(k+1)%4]]);
+  const next=new Map(border),ring=[border[0][0]];for(let k=1;k<6;k++)ring.push(next.get(ring.at(-1)));if(new Set(ring).size!==6||ring.some(i=>i===undefined)||next.get(ring[5])!==ring[0])continue;
+  const refs=new Set(ring.flatMap(i=>[...charts[i]])),floor=Math.min(T.quality(v,fa),T.quality(v,fb)),oldArea=T.faceArea(v,fa)+T.faceArea(v,fb);
+  for(let k=0;k<3;k++){
+   const pair=[[0,1,2,3],[3,4,5,0]].map(ids=>ids.map(j=>ring[(k+j)%6]));if(topo.edges.has(key(pair[0][0],pair[0][3])))continue;
+   if(Math.min(...pair.map(f=>T.quality(v,f)))<floor+.015||pair.some(f=>dot(normal(v,f),n)<.8)||Math.abs(pair.reduce((s,f)=>s+T.faceArea(v,f),0)/oldArea-1)>.04)continue;
+   const samples=pair.flatMap(f=>[mean(f.map(i=>v[i])),...T.triangulate(v,f).map(t=>mean(t.map(i=>v[i])))]);if(samples.some(p=>surface.sample(p,i=>refs.has(i)).distance>Math.min(2*tolerance,.04*Math.sqrt(oldArea))))continue;
+   mesh.faces[a]=pair[0];mesh.faces[b]=pair[1];const audit=A.inspect(mesh);
+   if(audit.valid&&audit.chi===topo.chi&&audit.components===topo.components)return {changedEdges:1,faces:[a,b],vertices:ring,cursor:cursor+index+1};
+   mesh.faces[a]=fa;mesh.faces[b]=fb;return {changedEdges:0,cursor:cursor+index+1};
+  }
+ }
+ return {changedEdges:0,cursor:cursor+48};
+}
+const api={convert,regularize,coarsen,evolve};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TopologiaQuads=api;
 })(globalThis);
