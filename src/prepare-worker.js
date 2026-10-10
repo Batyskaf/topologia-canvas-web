@@ -1,4 +1,4 @@
-importScripts('engine.js','audit.js','reduction.js','quadrangulate.js','import-mesh.js','dense-input.js','../vendor/fbx-loader.js');
+importScripts('engine.js?v=1.3.5','audit.js?v=1.3.5','reduction.js?v=1.3.5','quadrangulate.js?v=1.3.5','import-mesh.js?v=1.3.5','dense-input.js?v=1.3.5','../vendor/fbx-loader.js?v=1.3.5');
 self.onmessage=({data})=>{
  try{
   if(data.action==='parse'){
