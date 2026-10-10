@@ -84,5 +84,68 @@ function regularize(mesh,source,surface,sourceIds){
  }
  return {rotatedEdges:rotated,movedVertices:moved,qualityBefore,qualityAfter:mesh.faces.reduce((s,f)=>s+T.quality(v,f),0)/mesh.faces.length};
 }
-const api={convert,regularize};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TopologiaQuads=api;
+// Replace three-quad star fans by two quads across their six-vertex boundary.
+function mergeFans(mesh,source,surface,tolerance){
+ const {normal,dot,mean}=T.math,A=typeof module!=='undefined'&&module.exports?require('./audit.js'):root.TopologiaAudit,backup=JSON.parse(JSON.stringify(mesh)),topo=T.topology(mesh),used=new Set(),removed=new Set();
+ for(let center=0;center<mesh.vertices.length;center++){
+  const region=topo.incident[center];if(region.length!==3||region.some(i=>used.has(i)))continue;
+  const edges=[];for(const i of region){const f=mesh.faces[i];for(let k=0;k<4;k++){const e=topo.edges.get(key(f[k],f[(k+1)%4]));if(e.faces.filter(j=>region.includes(j)).length===1)edges.push([f[k],f[(k+1)%4]]);}}
+  if(edges.length!==6)continue;const next=new Map(edges),ring=[edges[0][0]];for(let k=1;k<6;k++)ring.push(next.get(ring.at(-1)));if(new Set(ring).size!==6||ring.some(i=>i===undefined)||next.get(ring[5])!==ring[0])continue;
+  const v=mesh.vertices,n=normal(v,mesh.faces[region[0]]),refs=[...new Set(region.flatMap(i=>mesh.faceSources[i]||[]))],old=region.map(i=>T.quality(v,mesh.faces[i])),limit=Math.min(.025*Math.sqrt(region.reduce((s,i)=>s+T.faceArea(v,mesh.faces[i]),0)),2*tolerance);
+  if(region.some(i=>dot(n,normal(v,mesh.faces[i]))<.995))continue;
+  let best=null,score=Math.max(.35,Math.min(...old));for(let k=0;k<3;k++){const pair=[[0,1,2,3],[3,4,5,0]].map(indices=>indices.map(j=>ring[(j+k)%6])),q=Math.min(...pair.map(f=>T.quality(v,f)));if(q<=score||pair.some(f=>dot(normal(v,f),n)<.995))continue;let hit=false;for(const f of pair)for(const p of [mean(f.map(i=>v[i])),...T.triangulate(v,f).map(t=>mean(t.map(i=>v[i])))])if(surface.sample(p,i=>refs.includes(i)).distance>limit)hit=true;if(!hit){score=q;best=pair;}}
+  if(!best)continue;mesh.faces[region[0]]=best[0];mesh.faces[region[1]]=best[1];mesh.faceSources[region[0]]=refs.slice();mesh.faceSources[region[1]]=refs.slice();for(const i of ring)mesh.vertexSources[i]=[...new Set([...(mesh.vertexSources[i]||[]),...refs])];region.forEach(i=>used.add(i));removed.add(region[2]);
+ }
+ if(!removed.size)return 0;
+ mesh.faces=mesh.faces.filter((_,i)=>!removed.has(i));mesh.faceSources=mesh.faceSources.filter((_,i)=>!removed.has(i));
+ // Keep unused vertices until the shared compaction stage; audit a compact copy.
+ const ids=[...new Set(mesh.faces.flat())],map=new Map(ids.map((i,j)=>[i,j])),check={vertices:ids.map(i=>mesh.vertices[i]),faces:mesh.faces.map(f=>f.map(i=>map.get(i)))},report=A.inspect(check);
+ if(!report.valid||report.chi!==topo.chi||report.components!==topo.components){Object.assign(mesh,backup);return 0;}return removed.size;
+}
+// Merge four quads into a curvature-controlled patch. Retain shared edge
+// midpoints next to finer patches; reconcile parity before quadrangulating.
+function coarsen(mesh,source,surface,sourceIds,tolerance=.04){
+ const A=typeof module!=='undefined'&&module.exports?require('./audit.js'):root.TopologiaAudit,{dot,normal,mean}=T.math;
+ const original=JSON.parse(JSON.stringify(mesh)),oldIds=sourceIds.slice();
+ const fans=mergeFans(mesh,source,surface,tolerance);if(fans){const ids=[...new Set(mesh.faces.flat())].sort((a,b)=>a-b),map=new Map(ids.map((v,i)=>[v,i]));mesh.faces=mesh.faces.map(f=>f.map(i=>map.get(i)));mesh.vertices=ids.map(i=>mesh.vertices[i]);mesh.vertexSources=ids.map(i=>mesh.vertexSources[i]);const mapped=ids.map(i=>sourceIds[i]);sourceIds.length=mapped.length;mapped.forEach((v,i)=>sourceIds[i]=v);}
+ const topo=T.topology(mesh),v=mesh.vertices,occupied=new Set(),patches=[],owner=new Map();
+ for(let center=0;center<v.length;center++){
+  const region=topo.incident[center];if(region.length!==4||region.some(i=>occupied.has(i)))continue;
+  const edges=[];for(const i of region)for(let k=0;k<4;k++){const f=mesh.faces[i],e=topo.edges.get(key(f[k],f[(k+1)%4]));if(e.faces.filter(j=>region.includes(j)).length===1)edges.push([f[k],f[(k+1)%4]]);}
+  if(edges.length!==8)continue;const next=new Map(edges),ring=[edges[0][0]];for(let k=1;k<8;k++)ring.push(next.get(ring.at(-1)));if(new Set(ring).size!==8||ring.some(i=>i===undefined)||next.get(ring[7])!==ring[0])continue;
+  const radial=new Set(region.flatMap(i=>{const f=mesh.faces[i],k=f.indexOf(center);return [f[(k+1)%4],f[(k+3)%4]];}));if(radial.size!==4)continue;
+  const corners=ring.filter(i=>!radial.has(i));if(corners.length!==4||T.quality(v,corners)<.5)continue;
+  const weights=region.map(i=>T.faceArea(v,mesh.faces[i])),average=T.math.unit(region.reduce((sum,i,k)=>T.math.add(sum,T.math.mul(normal(v,mesh.faces[i]),weights[k])),[0,0,0]));
+  const n=normal(v,corners),refs=[...new Set(region.flatMap(i=>mesh.faceSources[i]||[]))],area=region.reduce((s,i)=>s+T.faceArea(v,mesh.faces[i]),0);
+  // Compare the merged boundary with the area-weighted mean orientation;
+  // reject patches whose constituent normals vary by more than 12 degrees.
+  if(dot(n,average)<.995||region.some(i=>dot(normal(v,mesh.faces[i]),average)<Math.cos(Math.PI/15))||refs.some(i=>dot(normal(source.vertices,source.faces[i]),n)<Math.cos(Math.PI/15)))continue;
+  const limit=Math.min(2*tolerance,Math.sqrt(area)*.025),flat=new T.Surface({vertices:corners.map(i=>v[i]),faces:[[0,1,2,3]]});
+  if([center,...ring].some(i=>flat.sample(v[i]).distance>limit)||[mean(corners.map(i=>v[i])),...T.triangulate(v,corners).map(f=>mean(f.map(i=>v[i])))].some(p=>surface.sample(p,i=>refs.includes(i)).distance>limit))continue;
+  const mids=corners.map((a,k)=>{const pos=ring.indexOf(a);return ring[(pos+1)%8];});
+  const id=patches.length;patches.push({corners,mids,refs,region});for(const i of region){occupied.add(i);owner.set(i,id);}
+ }
+ if(!patches.length)return {collapsedQuads:fans,before:original.faces.length,after:mesh.faces.length,mergedFans:fans};
+ const splits=patches.map(p=>p.mids.map((mid,k)=>{const a=p.corners[k],b=p.corners[(k+1)%4],outside=[...new Set([...(topo.edges.get(key(a,mid))?.faces||[]),...(topo.edges.get(key(mid,b))?.faces||[])])].filter(i=>!p.region.includes(i));return outside.length===0||outside.some(i=>!owner.has(i))||new Set(outside.map(i=>owner.get(i))).size!==1;}));
+ const adj=new Map();patches.forEach((p,i)=>p.corners.forEach((a,k)=>{const e=key(a,p.corners[(k+1)%4]);if(!adj.has(e))adj.set(e,[]);adj.get(e).push([i,k]);}));
+ // Odd boundaries are joined through coarse neighbors, adding a shared split.
+ const odd=new Set(splits.map((s,i)=>s.filter(Boolean).length%2?i:-1).filter(i=>i>=0));
+ while(odd.size){const start=odd.values().next().value,queue=[start],parent=new Map([[start,null]]);let end=null;
+  for(let h=0;h<queue.length&&end===null;h++){const i=queue[h];for(let k=0;k<4;k++){if(splits[i][k])continue;const rows=adj.get(key(patches[i].corners[k],patches[i].corners[(k+1)%4])),other=rows.find(r=>r[0]!==i);if(!other||parent.has(other[0]))continue;parent.set(other[0],{i,k,otherK:other[1]});if(odd.has(other[0])){end=other[0];break;}queue.push(other[0]);}}
+  if(end===null)return {collapsedQuads:fans,before:original.faces.length,after:mesh.faces.length,mergedFans:fans,rejected:true};
+  odd.delete(start);odd.delete(end);let i=end;while(i!==start){const p=parent.get(i);splits[i][p.otherK]=true;splits[p.i][p.k]=true;i=p.i;}
+ }
+ const faces=[],faceSources=[];const emit=(f,refs)=>{faces.push(f);faceSources.push(refs.slice());};mesh.faces.forEach((f,i)=>{if(!occupied.has(i))emit(f.slice(),mesh.faceSources[i]||[]);});
+ patches.forEach((p,i)=>{const ring=[];p.corners.forEach((a,k)=>{ring.push(a);if(splits[i][k])ring.push(p.mids[k]);});
+  if(ring.length===4){emit(ring,p.refs);return;}
+  if(ring.length===6){let best=null,q=.2;for(let k=0;k<3;k++){const a=[0,1,2,3].map(j=>ring[(k+j)%6]),b=[3,4,5,0].map(j=>ring[(k+j)%6]),score=Math.min(T.quality(v,a),T.quality(v,b));if(score>q){q=score;best=[a,b];}}if(best){best.forEach(f=>emit(f,p.refs));return;}}
+  const center=v.length;v.push(mean(p.corners.map(j=>v[j])));mesh.vertexSources.push(p.refs.slice());sourceIds.push(-1);let best=null,score=-1;for(const offset of [0,1]){const fan=[];for(let k=0;k<ring.length;k+=2)fan.push([ring[(k+offset)%ring.length],ring[(k+offset+1)%ring.length],ring[(k+offset+2)%ring.length],center]);const q=Math.min(...fan.map(f=>T.quality(v,f)));if(q>score){score=q;best=fan;}}best.forEach(f=>emit(f,p.refs));
+ });
+ faces.forEach((f,i)=>f.forEach(id=>{mesh.vertexSources[id]=[...new Set([...(mesh.vertexSources[id]||[]),...faceSources[i]])];}));
+ const ids=[...new Set(faces.flat())].sort((a,b)=>a-b),map=new Map(ids.map((v,i)=>[v,i]));mesh.faces=faces.map(f=>f.map(i=>map.get(i)));mesh.faceSources=faceSources;mesh.vertices=ids.map(i=>v[i]);mesh.vertexSources=ids.map(i=>mesh.vertexSources[i]);const mapped=ids.map(i=>sourceIds[i]);sourceIds.length=mapped.length;mapped.forEach((id,i)=>sourceIds[i]=id);
+ const qualityFloor=Math.min(.3,...original.faces.map(f=>T.quality(original.vertices,f)));
+ const report=A.inspect(mesh);if(mesh.faces.some(f=>T.quality(mesh.vertices,f)<qualityFloor-1e-8)||!report.valid||report.chi!==topo.chi||report.components!==topo.components){Object.assign(mesh,original);sourceIds.length=oldIds.length;oldIds.forEach((id,i)=>sourceIds[i]=id);return {collapsedQuads:0,before:original.faces.length,after:original.faces.length,rejected:true,reason:report.errors.join(' ')||'Scalenie pogorszyłoby jakość quadów.'};}
+ return {collapsedQuads:original.faces.length-mesh.faces.length,before:original.faces.length,after:mesh.faces.length,mergedPatches:patches.length,mergedFans:fans};
+}
+const api={convert,regularize,coarsen};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TopologiaQuads=api;
 })(globalThis);
