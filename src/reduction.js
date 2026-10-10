@@ -1,0 +1,33 @@
+(function(root){
+'use strict';const T=typeof module!=='undefined'&&module.exports?require('./engine.js'):root.Topologia,{sub,add,mul,dot,cross,len,unit}=T.math;
+class Heap{constructor(){this.a=[];}push(x){const a=this.a;let i=a.length;a.push(x);while(i){const p=(i-1)>>1;if(a[p].cost<=x.cost)break;a[i]=a[p];i=p;}a[i]=x;}pop(){const a=this.a;if(!a.length)return null;const first=a[0],last=a.pop();if(a.length){let i=0;while(i*2+1<a.length){let j=i*2+1;if(j+1<a.length&&a[j+1].cost<a[j].cost)j++;if(a[j].cost>=last.cost)break;a[i]=a[j];i=j;}a[i]=last;}return first;}}
+const edgeKey=(a,b)=>a<b?`${a}:${b}`:`${b}:${a}`;
+function simplify(source,target,options={}){
+ if(!Number.isInteger(target)||target<4)throw Error('Budżet za mały dla redukcji chroniącej cechy.');
+ const v=source.vertices.map(p=>p.slice()),f=source.faces.flatMap(face=>T.triangulate(v,face)),valid=new Uint8Array(f.length).fill(1),alive=new Uint8Array(v.length).fill(1),version=new Uint32Array(v.length),incident=v.map(()=>new Set()),q=v.map(()=>new Float64Array(16)),edges=new Map(),pinned=new Set(),surface=new T.Surface(source),sourceTopo=T.topology(source),sourceNormals=source.faces.map(face=>T.math.normal(source.vertices,face)),provenance=v.map((_,i)=>new Set(sourceTopo.incident[i]));
+ f.forEach((face,id)=>{face.forEach(i=>incident[i].add(id));const d=cross(sub(v[face[1]],v[face[0]]),sub(v[face[2]],v[face[0]])),area=len(d)/2,n=unit(d),plane=[...n,-dot(n,v[face[0]])];for(const i of face)for(let a=0;a<4;a++)for(let b=0;b<4;b++)q[i][a*4+b]+=area*plane[a]*plane[b];for(let k=0;k<3;k++){const a=face[k],b=face[(k+1)%3],key=edgeKey(a,b);if(!edges.has(key))edges.set(key,{a,b,faces:[]});edges.get(key).faces.push(id);}});
+ const normal=face=>unit(cross(sub(v[face[1]],v[face[0]]),sub(v[face[2]],v[face[0]])));
+ for(const e of edges.values()){
+  const sharp=e.faces.length===2&&dot(normal(f[e.faces[0]]),normal(f[e.faces[1]]))<Math.cos(50*Math.PI/180);
+  if(e.faces.length!==2||sharp&&options.featureMode!=='weighted'){pinned.add(e.a);pinned.add(e.b);}
+  if(sharp&&options.featureMode==='weighted'){
+   const direction=unit(sub(v[e.b],v[e.a]));for(const id of e.faces){const n=unit(cross(direction,normal(f[id]))),plane=[...n,-dot(n,v[e.a])],weight=10*len(sub(v[e.a],v[e.b]));for(const i of [e.a,e.b])for(let a=0;a<4;a++)for(let b=0;b<4;b++)q[i][a*4+b]+=weight*plane[a]*plane[b];}
+  }
+ }
+ const neighbors=i=>{const ns=new Set();for(const id of incident[i])if(valid[id])for(const j of f[id])if(j!==i)ns.add(j);return ns;};
+ const value=(m,p)=>{const a=[...p,1];let cost=0;for(let i=0;i<4;i++)for(let j=0;j<4;j++)cost+=a[i]*m[i*4+j]*a[j];return Math.max(0,cost);};
+ const solve=m=>{const a=[0,1,2].map(i=>[m[i*4],m[i*4+1],m[i*4+2],-m[i*4+3]]);for(let k=0;k<3;k++){let p=k;for(let i=k+1;i<3;i++)if(Math.abs(a[i][k])>Math.abs(a[p][k]))p=i;if(Math.abs(a[p][k])<1e-12)return null;[a[p],a[k]]=[a[k],a[p]];const d=a[k][k];for(let j=k;j<4;j++)a[k][j]/=d;for(let i=0;i<3;i++)if(i!==k){const d=a[i][k];for(let j=k;j<4;j++)a[i][j]-=d*a[k][j];}}return a.map(row=>row[3]);};
+ const heap=new Heap();let collapses=0,count=f.length;const enqueue=(a,b)=>{if(a>b)[a,b]=[b,a];if(!alive[a]||!alive[b]||pinned.has(a)&&pinned.has(b))return;if(pinned.has(b))[a,b]=[b,a];const fixed=pinned.has(a);const matrix=Float64Array.from(q[a],(x,i)=>x+q[b][i]),points=fixed?[v[a]]:[mul(add(v[a],v[b]),.5),v[a],v[b]],solution=fixed?null:solve(matrix);if(solution&&solution.every(Number.isFinite))points.push(solution);let point=points[0],cost=Infinity;for(const p of points){const c=value(matrix,p);if(c<cost){cost=c;point=p;}}cost+=1e-8*dot(sub(v[a],v[b]),sub(v[a],v[b]));heap.push({a,b,va:version[a],vb:version[b],cost,point,matrix});};
+ const A=typeof module!=='undefined'&&module.exports?require('./audit.js'):root.TopologiaAudit,collider=options.featureMode==='weighted'?new A.CollisionIndex({vertices:v,faces:f,active:valid}):null;
+ for(const e of edges.values())enqueue(e.a,e.b);
+ while(count>target){const e=heap.pop();if(!e)break;const{a,b}=e;if(!alive[a]||!alive[b]||version[a]!==e.va||version[b]!==e.vb)continue;const commonFaces=[...incident[a]].filter(id=>valid[id]&&f[id].includes(b));if(commonFaces.length!==2)continue;const na=neighbors(a),nb=neighbors(b),opposite=new Set(commonFaces.flatMap(id=>f[id].filter(i=>i!==a&&i!==b))),common=[...na].filter(i=>nb.has(i));if(common.length!==opposite.size||common.some(i=>!opposite.has(i)))continue;
+  const region=new Set([...incident[a],...incident[b]].filter(id=>valid[id])),allowedSource=new Set();for(const id of [a,b])for(const sf of provenance[id])allowedSource.add(sf);for(const sf of [...allowedSource])for(const neighbor of sourceTopo.adj[sf])allowedSource.add(neighbor);
+  const referenceNormal=unit([...region].reduce((sum,id)=>add(sum,normal(f[id])),[0,0,0])),hit=surface.sample(e.point,id=>allowedSource.has(id)&&dot(sourceNormals[id],referenceNormal)>.05),point=pinned.has(a)?v[a].slice():hit.face>=0?hit.point:v[a].slice(),changed=[];let safe=true;for(const id of region){if(commonFaces.includes(id))continue;const face=f[id].map(i=>i===b?a:i),ps=face.map(i=>i===a?point:v[i]),d=cross(sub(ps[1],ps[0]),sub(ps[2],ps[0]));if(new Set(face).size!==3||len(d)<1e-12||dot(unit(d),normal(f[id]))<.5){safe=false;break;}changed.push([id,face]);}if(!safe)continue;
+  if(collider){const before=v[a],oldFaces=changed.map(([id])=>[id,f[id]]);v[a]=point;for(const[id,face]of changed)f[id]=face;for(const id of commonFaces)valid[id]=0;const clear=collider.canMove(changed.map(([id])=>id));v[a]=before;for(const[id,face]of oldFaces)f[id]=face;for(const id of commonFaces)valid[id]=1;collider.refreshFaces([...region]);if(!clear)continue;}
+  for(const id of region)for(const i of f[id])incident[i].delete(id);for(const id of commonFaces){valid[id]=0;count--;}for(const[id,face]of changed){f[id]=face;for(const i of face)incident[i].add(id);}v[a]=point;provenance[a]=allowedSource;q[a]=e.matrix;alive[b]=0;incident[b].clear();version[a]++;version[b]++;collapses++;if(collider)collider.refreshFaces(changed.map(([id])=>id));for(const j of neighbors(a))enqueue(a,j);
+ }
+ const faces=f.filter((_,i)=>valid[i]),used=[...new Set(faces.flat())].sort((a,b)=>a-b),map=new Map(used.map((id,i)=>[id,i])),out={vertices:used.map(i=>v[i]),faces:faces.map(face=>face.map(i=>map.get(i))),vertexSourceIds:used,vertexSources:used.map(i=>[...provenance[i]]),faceSources:faces.map(face=>[...new Set(face.flatMap(i=>[...provenance[i]]))]),collapses,trianglesBefore:f.length,trianglesAfter:faces.length,targetReached:count<=target};
+ T.topology(out);return out;
+}
+const api={simplify};if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TopologiaReduction=api;
+})(globalThis);
